@@ -21,17 +21,21 @@ class SyntheticScene:
         (255, 255, 0), (255, 165, 0), (255, 0, 0), (128, 0, 128),
     ]
 
-    def __init__(self, projector: Projector, geometry: TrackGeometry, speeds: list[float] | None = None):
+    def __init__(self, projector: Projector, geometry: TrackGeometry, speeds: list[float] | None = None,
+                 use_acceleration: bool = False):
         self.projector = projector
         self.geometry = geometry
+        self.use_acceleration = use_acceleration
         self.speeds = speeds or [9.5, 9.8, 10.2, 9.0, 8.5, 9.3, 8.8, 10.5]
         self.h, self.w = 1080, 1920
         self.length = geometry.length
         self._finish_dms: dict[int, float] = {}
         if geometry._model is not None:
             self._race_distance = geometry._model.race_distance()
-            for lane in range(1, 9):
-                self._finish_dms[lane] = self._race_distance
+        else:
+            self._race_distance = self.length
+        for lane in range(1, 9):
+            self._finish_dms[lane] = self._race_distance
         self._static_noise: np.ndarray | None = None
         self._track_noise: np.ndarray | None = None
 
@@ -43,11 +47,19 @@ class SyntheticScene:
         athletes = []
         finish_dm = self._race_distance if hasattr(self, '_race_distance') else self.length
         for lane in range(1, 9):
-            d_m = max(0, t * self.speeds[lane - 1])
+            v_max = self.speeds[lane - 1]
+            if self.use_acceleration:
+                tau = 1.5 + lane * 0.05
+                d_m = v_max * (t + tau * (np.exp(-t / tau) - 1))
+                d_m = max(0.0, d_m)
+                speed = v_max * (1.0 - np.exp(-t / tau))
+            else:
+                d_m = max(0.0, t * v_max)
+                speed = v_max
             finished = d_m >= finish_dm
-            if self._finish_dms and finished:
+            if finished:
                 d_m = self._finish_dms[lane]
-            athletes.append(SynthAthleteState(lane=lane, speed=self.speeds[lane - 1], d_m=d_m, finished=finished))
+            athletes.append(SynthAthleteState(lane=lane, speed=speed, d_m=d_m, finished=finished))
         return athletes
 
     def _get_img_pos(self, athlete: SynthAthleteState):
@@ -162,10 +174,10 @@ class SyntheticScene:
             lane_fill_pts: list[list[WorldCoord]] = []
             lane_div_pts: list[list[WorldCoord]] = []
             for lane in range(1, 9):
-                fill = [WorldCoord(L * i / n, self.geometry.world_coord(lane, L * i / n).y, 0.0) for i in range(n + 1)]
+                fill = [self.geometry.world_coord(lane, L * i / n) for i in range(n + 1)]
                 lane_fill_pts.append(fill)
                 if lane < 9:
-                    div = [WorldCoord(L * i / n, self.geometry.world_coord(lane, L * i / n, lateral_shift=-self.geometry.lane_width/2).y, 0.0) for i in range(n + 1)]
+                    div = [self.geometry.world_coord(lane, L * i / n, lateral_shift=-self.geometry.lane_width/2) for i in range(n + 1)]
                     lane_div_pts.append(div)
             # Batch project all fill points
             all_fill = [p for seg in lane_fill_pts for p in seg]
@@ -239,6 +251,22 @@ class SyntheticScene:
 
         canvas = np.clip(canvas.astype(np.int16) + self._track_noise, 20, 140).astype(np.uint8)
         return canvas
+
+    def generate_spurious_detections(self, count: int = 30, seed: int = 123) -> list[Detection]:
+        rng = np.random.RandomState(seed)
+        dets = []
+        for _ in range(count):
+            cx = rng.randint(0, self.w)
+            cy = rng.randint(0, self.h)
+            bh = rng.randint(40, 200)
+            bw = rng.randint(15, 80)
+            x1 = max(0, cx - bw // 2)
+            y1 = max(0, cy - bh // 2)
+            x2 = min(self.w, cx + bw // 2)
+            y2 = min(self.h, cy + bh // 2)
+            if x2 - x1 >= 4 and y2 - y1 >= 4:
+                dets.append(Detection(bbox=(x1, y1, x2, y2), confidence=rng.uniform(0.3, 0.98)))
+        return dets
 
     def get_detections(self, athletes: list[SynthAthleteState]) -> list[Detection]:
         detections = []

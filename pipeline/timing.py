@@ -33,7 +33,7 @@ class RaceTimer:
 
     def finish_race(self, timestamp: float | None = None):
         if not self.race_finished:
-            self.finish_time = timestamp if timestamp is not None else 0.0
+            self.finish_time = timestamp if timestamp is not None else (self.t0 or 0.0)
             self.race_finished = True
 
     def reset(self):

@@ -56,16 +56,32 @@ class TrackARPipeline:
         self._texture_cache: dict[int, tuple[str, np.ndarray]] = {}
         self._anchor_timestamps: dict[int, float] = {}
         self._copy_buffer: np.ndarray | None = None
-        self._start_decisions: list[int] = []  # rolling window for race start
+        self._start_decisions: list[int] = []
+        self._start_dm_threshold = 1.0
+        self._start_speed_threshold = 2.0
+        self._start_min_athletes = 3
+        self._start_window_size = 3
+        self._start_consistent_count = 2
 
     def calibrate_from_points(self, world_pts, image_pts):
         self.calibrator.solve_pnp(world_pts, image_pts)
         self.projector.set_extrinsics(self.calibrator.rvec, self.calibrator.tvec)
-        self.projector.set_calibration_world_pts(world_pts)
+        track_pts = list(world_pts) + self.geometry.build_tracking_grid(step=10.0)
+        self.projector.set_calibration_world_pts(track_pts)
         self._calib_rvec = self.calibrator.rvec.copy()
         self._calib_tvec = self.calibrator.tvec.copy()
         self.calibrated = True
         self._compute_track_bbox()
+        self._finish_distances = {lane: self.geometry.finish_distance(lane) for lane in range(1, 9)}
+        # Adaptive finish tolerance: wider when calibration has noise
+        calib_err = self.calibrator.get_projection_error(world_pts, image_pts)
+        self._finish_tolerance = max(0.5, 0.5 + calib_err * 2.0)
+        # Pre-initialize all 8 athletes so pending-track mechanism
+        # is not required (avoids false-positive disruption)
+        self.assigner.preinitialize_athletes(
+            lanes=list(range(1, 9)),
+            start_positions=self._finish_distances,
+        )
 
     def _compute_track_bbox(self):
         """Compute track bounding box in image space for audience filtering."""
@@ -117,20 +133,18 @@ class TrackARPipeline:
             self.frame_tracker.update(gray)
             H = self.frame_tracker.H_calib_current
             self.assigner.set_H_calib_current(H)
-            # Project calibration world points through the ORIGINAL calibration
-            # extrinsics, warp through cumulative H_calib_current, re-solve PnP.
-            # Using the same reference every frame avoids drift accumulation.
-            saved_r, saved_t = self.projector.rvec, self.projector.tvec
             if hasattr(self, '_calib_rvec') and self._calib_rvec is not None:
                 self.projector.rvec = self._calib_rvec
                 self.projector.tvec = self._calib_tvec
-            self.projector.track_homography(H)
-            # project() in the saved_r/saved_t was never tracked to current frame --
-            # but track_homography just updated projector to the current frame's pose
-            # After extrinsics update, projector is synced to current frame
-            self.assigner.set_H_calib_current(np.eye(3, dtype=np.float64))
-        if not self.frame_tracker.is_ready():
-            self.assigner.set_H_calib_current(None)
+            # Scale tracker H from low-res to full-res for track_homography
+            H_pnp = H
+            if hasattr(self.frame_tracker, '_scale') and abs(self.frame_tracker._scale - 1.0) > 0.01:
+                s = 1.0 / self.frame_tracker._scale
+                S = np.diag([s, s, 1.0]).astype(np.float64)
+                H_pnp = S @ H @ np.linalg.inv(S)
+            pose_updated = self.projector.track_homography(H_pnp)
+            if pose_updated:
+                self.assigner.set_H_calib_current(np.eye(3, dtype=np.float64))
 
         if external_detections is not None:
             detections = external_detections
@@ -139,11 +153,14 @@ class TrackARPipeline:
         athletes = self.assigner.process_frame(detections, frame_dt=frame_dt)
         positions = self.estimator.estimate(athletes, timestamp)
         if not self.timer.race_started:
-            past_threshold = sum(1 for p in positions if p.d_m > 1.0 and p.speed_mps > 2.0 and p.confidence > 0.0)
+            past_threshold = sum(1 for p in positions
+                                 if p.d_m > self._start_dm_threshold
+                                 and p.speed_mps > self._start_speed_threshold
+                                 and p.confidence > 0.0)
             self._start_decisions.append(past_threshold)
-            if len(self._start_decisions) > 3:
+            if len(self._start_decisions) > self._start_window_size:
                 self._start_decisions.pop(0)
-            consistent = sum(1 for v in self._start_decisions if v >= 3) >= 2
+            consistent = sum(1 for v in self._start_decisions if v >= self._start_min_athletes) >= self._start_consistent_count
             if consistent:
                 self.timer.start_race(timestamp)
         current_time = self.timer.get_elapsed(timestamp)
@@ -158,8 +175,7 @@ class TrackARPipeline:
                     frame_count=self.frame_count, confidence=0.0,
                 ))
         ranks = self.ranking.compute(positions, current_time)
-        if self.dynamic_camera.follow_mode:
-            self.dynamic_camera.update(positions)
+        self._last_positions = positions
         all_athletes_list = list(athletes.values())
         anchors = {}
         for lane, athlete in athletes.items():
@@ -196,8 +212,11 @@ class TrackARPipeline:
                 self._texture_cache[lane] = (cache_key, texture)
             self.decal_renderer.render_decal(output, DecalInstance(None, anchor, texture))
         self.debug_overlay.draw(output, athletes, anchors, self.frame_count, self.fps)
-        finish_distances = {lane: self.geometry.finish_distance(lane) for lane in range(1, 9)}
-        self.standings.draw(output, ranks, positions, self.timer, self.athlete_names, self.geometry.length, timestamp, finish_distances)
+        finish_distances = getattr(self, '_finish_distances', {lane: self.geometry.finish_distance(lane) for lane in range(1, 9)})
+        finish_tolerance = getattr(self, '_finish_tolerance', 0.5)
+        self.standings.draw(output, ranks, positions, self.timer, self.athlete_names,
+                            self.geometry.length, timestamp, finish_distances,
+                            finish_tolerance_m=finish_tolerance)
         # Stop the timer once all athletes have finished
         all_finished = len(self.standings.finish_times) >= 8
         if all_finished and not self.timer.race_finished:
@@ -222,40 +241,44 @@ class TrackARPipeline:
             fourcc = cv2.VideoWriter.fourcc(*'mp4v')
             writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
         frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_idx += 1
-            if max_frames > 0 and frame_idx > max_frames:
-                break
-            timestamp = frame_idx / fps
-            output = self.process_frame(frame, timestamp, frame_dt=1.0/fps)
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_idx += 1
+                if max_frames > 0 and frame_idx > max_frames:
+                    break
+                timestamp = frame_idx / fps
+                output = self.process_frame(frame, timestamp, frame_dt=1.0/fps)
+                if writer:
+                    writer.write(output)
+                cv2.imshow("TrackAR Pipeline", output)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+        finally:
+            cap.release()
             if writer:
-                writer.write(output)
-            cv2.imshow("TrackAR Pipeline", output)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        cap.release()
-        if writer:
-            writer.release()
-        cv2.destroyAllWindows()
+                writer.release()
+            cv2.destroyAllWindows()
 
     def run_live(self, camera_id: int = 0):
         import time as _time
         prev_t = _time.time()
         cap = cv2.VideoCapture(camera_id)
-        while self.running:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            now = _time.time()
-            dt = now - prev_t
-            prev_t = now
-            output = self.process_frame(frame, frame_dt=dt)
-            cv2.imshow("TrackAR Live", output)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.running = False
-                break
-        cap.release()
-        cv2.destroyAllWindows()
+        try:
+            while self.running:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                now = _time.time()
+                dt = now - prev_t
+                prev_t = now
+                output = self.process_frame(frame, frame_dt=dt)
+                cv2.imshow("TrackAR Live", output)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.running = False
+                    break
+        finally:
+            cap.release()
+            cv2.destroyAllWindows()

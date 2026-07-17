@@ -10,8 +10,9 @@ real-time ar overlay for track & field video (100m straight + 400m oval curves/s
 - pip configured to tsinghua index, aliyun extra-index.
 - `--track-type {100m,400m}` accepted during calibration.
 - 400m track model: iaaf standard (inner-edge radius 36.5 m, lane width 1.22 m, straight 84.39 m); each lane has unique curve arc & stagger offset; `world_coord` wraps dm via `_arc_at` modulo `total_arc_length`.
-- **frametracker**: orb downscaled to 640x360, 800 features, bfmatcher crosscheck, every-frame pairwise tracking with usac_magsac (3.0), reference updated each frame (not static).
-- **lanetracker**: goodFeaturesToTrack + KLT optical flow at 640×360; max_features=400, redetect_every=60, INTER_NEAREST downscale. Optimized to ~5 ms/frame.
+- **frametracker** (`calibration/frame_tracker.py`): ORB-based, used ONLY for calibration rectification (multi-frame click alignment in GUI/run_real_video.py). Not used per-frame in pipeline. Has `_H_cumulative` + reference refresh for long pan sequences.
+- **lanetracker** (`calibration/lane_tracker.py`): pipeline's per-frame homography engine. goodFeaturesToTrack + KLT (640×360, max_features=400, redetect_every=60, INTER_NEAREST). ~5 ms/frame.
+  - `_H_cumulative` + `_current_H` split: total H = `_current_H @ _H_cumulative`. Drift correction every 60 frames tracks from ORIGINAL calibration frame (Priority 1, always applied when successful — drift-free). Falls back to rolling reference (Priority 2, threshold 1.0). When original frame tracking fails (camera panned too far), rolling reference is refreshed and H accumulated into `_H_cumulative`.
 - **laneassigner**: vectorised numpy nearest-neighbour; pending-track 2-frame delay; lane-specific dm matching; `_find_dm_on_lane` for both 100m/400m; fallback re-acquisition (step 1.5) with relaxed thresholds for 400m.
   - **NMS**: IoU ≥ 0.85 suppresses duplicate detections (same-athlete YOLO overlaps).
   - **Track region filter**: 100m detections filtered by image-space bbox computed from calibration. Spectators outside track bounds are rejected.
@@ -32,29 +33,31 @@ real-time ar overlay for track & field video (100m straight + 400m oval curves/s
 - `pipeline/timing.py` -- video-timestamp based timer, finish-lap stop.
 - `pipeline/main_pipeline.py` -- race start/finish logic, calib reference storage, track_homography design, `_compute_track_bbox()` for 100m audience filtering.
 - `rendering/standings.py` -- per-lane finish time recording.
-- `calibration/frame_tracker.py` -- pairwise orb tracking, every-frame reference update, usac_magsac.
+- `calibration/frame_tracker.py` -- ORB-based, pairwise tracking, usac_magsac, reference refresh with `_H_cumulative` for long pan sequences.
 - `calibration/coords.py` -- finish_distance, calibration_world_points.
 - `calibration/projector.py` -- track_homography refactored, dense tracking grid reduced y-step 1.22m, useExtrinsicGuess reverted.
-- `calibration/lane_tracker.py` -- optimised max_features 400, redetect_every 60, INTER_NEAREST.
+- `calibration/lane_tracker.py` -- `_H_cumulative` + `_current_H` split for drift-free correction; always-applied original-frame tracking (Priority 1); rolling reference fallback (Priority 2, threshold 1.0); reference refresh with H accumulation.
 - `tests/synthetic_scene.py` -- render_background() with Perlin noise (no cross markers). get_detections: y2=cy (bbox bottom = foot), proper clamping.
-- `tests/self_test.py` -- 400m camera params updated (eye=(-50,-80,100) shows all 8 lanes entire race). Boom tolerance 0.3→1.5s. qc_400m_sideview removed. 35-test suite.
+- `tests/self_test.py` -- 32-test suite (13 quick cal + 15 full-race + 1 dummy + 3 stress). Redundant scenarios removed (boom, dolly, side view, 400m stress, extra target variants).
 
 ### active
-- **Test results**: **35/35 ALL PASS**
+- **Test results**: **32/32 ALL PASS**
   - Quick calibration checks: 13/13 (qc_400m_sideview removed — side camera designed for 100m only)
-  - Full-race static: 10/10 (standard + target + side view)
+  - Full-race static: 4/4 (std + target, 100m + 400m)
   - Full-race pan (std + target, 100m + 400m): 4/4 within 0.2s
-  - Full-race 400m zoom (std + target): 2/2 within 0.2s
-  - Full-race boom (100m): 2/2 within 1.5s tolerance (PnP depth ambiguity — same as zoom/dolly on narrow track)
-  - Full-race 100m zoom ±0.5m: 2/2 within 1.5s tolerance
-  - Full-race 100m dolly ±0.5m: 2/2 within 0.5s tolerance
+  - Full-race 100m zoom std: 1/1 within 0.2s
+  - Full-race panzoom (std, 100m + 400m): 2/2 within 0.2s
+  - Full-race 100m false positives (30/frame): 1/1 within 0.5s
+  - Full-race 100m jitter (random shake): 1/1 within 0.5s
+  - Full-race 100m 50% dropout: 1/1 within 0.5s
+  - Full-race 100m 3px calib noise: 1/1 within 1.0s
 
 ### blocked
 - *(none)*
 
 ## next move
-1. Test with real video (user's 100m ground-level panning sample) to validate ORB homography stability.
-2. Profile pipeline throughput on RTX 5070 (ORB, YOLO, assigner frame times).
+1. Test with real video (user's DJI_20250929143730_0193_D, 411 frames panning) to validate LaneFeatureTracker drift correction.
+2. Profile pipeline throughput on RTX 5070 (KLT, YOLO, assigner frame times).
 3. Investigate manual start button for real-video timer reliability.
 
 ## relevant files
@@ -65,10 +68,10 @@ real-time ar overlay for track & field video (100m straight + 400m oval curves/s
 - `d:\track_ar\rendering\standings.py`: per-lane finish time
 - `d:\track_ar\calibration\projector.py`: track_homography refactored, dense tracking grid, useExtrinsicGuess reverted
 - `d:\track_ar\calibration\coords.py`: finish_distance, calibration_world_points
-- `d:\track_ar\calibration\frame_tracker.py`: pairwise orb tracking
-- `d:\track_ar\calibration\lane_tracker.py`: optimised max_features 400, redetect_every 60, INTER_NEAREST
+- `d:\track_ar\calibration\frame_tracker.py`: ORB-based rectification, reference refresh with `_H_cumulative`
+- `d:\track_ar\calibration\lane_tracker.py`: `_H_cumulative`/`_current_H` split, reference refresh, original-frame drift correction (Priority 1 always applied)
 - `d:\track_ar\tests\synthetic_scene.py`: render_background(), per-lane finish dm
-- `d:\track_ar\tests\self_test.py`: 35-test suite (13 quick cal + 22 full-race)
+- `d:\track_ar\tests\self_test.py`: 32-test suite (13 quick cal + 15 full-race + 1 dummy + 3 stress)
 - `d:\track_ar\demo.py`: fixed 400m synthetic calibration
 - `d:\track_ar\trackar_gui.py`: chinese calibration UI, multi-frame rectification
 - `d:\track_ar\run_real_video.py`: fixed method name

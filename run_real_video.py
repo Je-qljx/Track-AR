@@ -18,12 +18,13 @@ from calibration.coords import TrackGeometry, WorldCoord, ImageCoord
 from calibration.frame_tracker import FrameTracker
 from pipeline.main_pipeline import TrackARPipeline
 
-CALIB_NAMES = ["Start x Lane1", "Start x Lane8", "Finish x Lane1", "Finish x Lane8"]
+CALIB_NAMES_100M = ["Start x Lane1", "Start x Lane8", "Finish x Lane1", "Finish x Lane8"]
+CALIB_NAMES_400M = ["Start x Lane1", "Start x Lane8", "Far-end x Lane1", "Far-end x Lane8"]
 CALIB_COLORS = [(0, 0, 255), (0, 165, 255), (0, 255, 0), (0, 255, 255)]
 
 
 class ClickCalibrator:
-    def __init__(self, cap: cv2.VideoCapture):
+    def __init__(self, cap: cv2.VideoCapture, track_type: str = "100m"):
         self.cap = cap
         self.total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.frame_idx = 0
@@ -31,7 +32,12 @@ class ClickCalibrator:
         self.points: list[tuple[int, int]] = []
         self.frames: list[np.ndarray] = []
         self.current = 0
+        self.track_type = track_type
         self._seek(0)
+
+    @property
+    def _calib_names(self):
+        return CALIB_NAMES_400M if self.track_type == "400m" else CALIB_NAMES_100M
 
     def _seek(self, idx: int):
         idx = max(0, min(idx, self.total_frames - 1))
@@ -56,11 +62,11 @@ class ClickCalibrator:
             cv2.circle(self.display, (px, py), 8, CALIB_COLORS[i], -1)
             cv2.putText(self.display, f"{i+1}", (px + 10, py + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, CALIB_COLORS[i], 2)
-            cv2.putText(self.display, CALIB_NAMES[i], (px + 10, py + 25),
+            cv2.putText(self.display, self._calib_names[i], (px + 10, py + 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, CALIB_COLORS[i], 1)
         y_offset = 60
         if self.current < 4:
-            remaining = [f"  Click {i+1}: {CALIB_NAMES[i]}" for i in range(self.current, 4)]
+            remaining = [f"  Click {i+1}: {self._calib_names[i]}" for i in range(self.current, 4)]
             for li, line in enumerate(remaining):
                 cv2.putText(self.display, line, (30, y_offset + li * 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -156,18 +162,32 @@ def main():
                   [0, 0, 1]], dtype=np.float64)
     print(f"[INFO] Focal length: {src}")
 
+    is_400m = args.track_type == "400m"
+    if is_400m:
+        calib_names_display = CALIB_NAMES_400M
+        calib_instruction = (
+            "CALIBRATION — Navigate to a frame showing the start line and the far-end\n"
+            "  of the track (opposite straight), then click 4 points:\n"
+            "    1. Start x Lane 1    2. Start x Lane 8\n"
+            "    3. Far-end x Lane 1  4. Far-end x Lane 8"
+        )
+    else:
+        calib_names_display = CALIB_NAMES_100M
+        calib_instruction = (
+            "CALIBRATION — Navigate to a frame showing BOTH start and finish lines,\n"
+            "  then click the 4 points in order:\n"
+            "    1. Start line x Lane 1 (bottom lane)\n"
+            "    2. Start line x Lane 8 (top lane)\n"
+            "    3. Finish line x Lane 1\n"
+            "    4. Finish line x Lane 8"
+        )
     print("\n" + "=" * 60)
-    print("  CALIBRATION — Navigate to a frame showing BOTH start and finish lines,")
-    print("  then click the 4 points in order:")
-    print("    1. Start line x Lane 1 (bottom lane)")
-    print("    2. Start line x Lane 8 (top lane)")
-    print("    3. Finish line x Lane 1")
-    print("    4. Finish line x Lane 8")
+    print(f"  {calib_instruction}")
     print("  <- / ->  = step 1 frame    [ / ]  = step 10 frames")
     print("  Press SPACE to confirm, 'r' to redo, 'q' to quit")
     print("=" * 60)
 
-    calibrator = ClickCalibrator(cap)
+    calibrator = ClickCalibrator(cap, track_type=args.track_type)
     result = calibrator.run()
     if result is None:
         print("[INFO] Calibration cancelled.")
@@ -178,18 +198,18 @@ def main():
     # Rectify calibration points: transform all to first click's frame (reference frame)
     print("\n[RECTIFY] Aligning all calibration points to reference frame (click 1's frame)...")
     ref_gray = cv2.cvtColor(calib_frames[0], cv2.COLOR_BGR2GRAY)
-    # Use higher feature count for calibration (frames may be very different)
-    ft = FrameTracker(max_width=640, skip_interval=1)
+    ft = FrameTracker(max_width=640)
     ft.orb = cv2.ORB.create(nfeatures=2000)
     ft.set_reference(ref_gray)
-    print(f"  Reference: {len(ft.ref_kp)} features detected")
+    print(f"  Reference: {len(ft._ref_kp) if ft._ref_kp else 0} features detected")
     rectified_pixels = [calib_pixels[0]]  # first point is already in ref frame
     for i in range(1, 4):
         gray = cv2.cvtColor(calib_frames[i], cv2.COLOR_BGR2GRAY)
-        H = ft.update(gray)
+        ft.update(gray)
         u, v = ft.current_to_calib(float(calib_pixels[i][0]), float(calib_pixels[i][1]))
         rectified_pixels.append((int(round(u)), int(round(v))))
-        print(f"  Point {i+1} -> ref frame: ({calib_pixels[i][0]}, {calib_pixels[i][1]}) -> ({int(round(u))}, {int(round(v))}), matches={len(ft._last_matches) if hasattr(ft, '_last_matches') else '?'}")
+        info = ft.last_match_info
+        print(f"  Point {i+1} -> ref frame: ({calib_pixels[i][0]}, {calib_pixels[i][1]}) -> ({int(round(u))}, {int(round(v))}), method={info.get('method','?')}, matches={info.get('first_matches', info.get('pairwise_matches', '?'))}")
     print("[OK] Calibration rectified to reference frame (click 1's frame):")
     for i, (orig, rect) in enumerate(zip(calib_pixels, rectified_pixels)):
         print(f"  Point {i+1}: original ({orig[0]}, {orig[1]}) -> rectified ({rect[0]}, {rect[1]})")
@@ -208,7 +228,7 @@ def main():
     # Set reference frame on pipeline's frame_tracker
     pipeline.frame_tracker.set_reference(ref_gray)
     cal_err = pipeline.calibrator.get_projection_error(world_pts, image_pts)
-    pipeline.calibrator.print_calibration_debug(world_pts, image_pts)
+    pipeline.calibrator.print_calibration_debug(world_pts, image_pts, geom.calibration_point_labels())
     if cal_err > 15:
         print(f"[WARN] Calibration error: {cal_err:.3f} px — 过高！正常应 < 5px")
         print("       可能原因：")
@@ -258,9 +278,10 @@ def main():
         writer.write(output)
 
         # Progress every 10%
-        pct = frame_idx / min(args.max_frames, total_frames) * 100 if args.max_frames > 0 else frame_idx / total_frames * 100
+        n_total = min(args.max_frames, total_frames) if args.max_frames > 0 else total_frames
+        pct = frame_idx / n_total * 100
         if pct - last_report >= 10:
-            print(f"  Progress: {pct:.0f}% ({frame_idx}/{min(args.max_frames, total_frames) if args.max_frames > 0 else total_frames})  FPS: {pipeline.fps:.1f}")
+            print(f"  Progress: {pct:.0f}% ({frame_idx}/{n_total})  FPS: {pipeline.fps:.1f}")
             last_report = pct
 
         key = cv2.waitKey(1) & 0xFF

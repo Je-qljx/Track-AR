@@ -3,6 +3,14 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from calibration.coords import TrackGeometry, WorldCoord, ImageCoord
+
+
+def rects_overlap(a: tuple, b: tuple, margin_px: float = 0) -> bool:
+    x1 = max(a[0], b[0]) - margin_px
+    y1 = max(a[1], b[1]) - margin_px
+    x2 = min(a[2], b[2]) + margin_px
+    y2 = min(a[3], b[3]) + margin_px
+    return x1 < x2 and y1 < y2
 from calibration.projector import Projector
 from detection.detector import Detection
 from tracking.lane_assigner import AthleteState
@@ -62,6 +70,7 @@ class OcclusionGuard:
     ) -> GraphicAnchor:
         lane = athlete.lane
         d_m = athlete.d_m
+        athlete_bbox = athlete.detection.bbox if athlete.detection else None
         for ahead_m, lateral_m, mode in _PLACEMENT_CANDIDATES:
             g_dm = d_m + (ahead_m if not mode.startswith("behind") else -ahead_m)
             if distance_to_end is not None and g_dm > self.geometry.length:
@@ -70,7 +79,20 @@ class OcclusionGuard:
                 continue
             G_world = self.geometry.world_coord(lane, g_dm, lateral_shift=lateral_m, z=0.0)
             G_img = self.projector.project(G_world)
-            return GraphicAnchor(world=G_world, image=G_img, offset_ahead=ahead_m, placement_mode=mode)
+            g_bbox = compute_graphic_bbox(G_world, self.projector, GRAPHIC_WIDTH, GRAPHIC_HEIGHT)
+            collides = False
+            if athlete_bbox is not None and rects_overlap(g_bbox, athlete_bbox):
+                collides = True
+            if not collides:
+                for other in all_athletes:
+                    if other.lane == lane or other.detection is None:
+                        continue
+                    other_bbox = other.detection.bbox
+                    if rects_overlap(g_bbox, other_bbox):
+                        collides = True
+                        break
+            if not collides:
+                return GraphicAnchor(world=G_world, image=G_img, offset_ahead=ahead_m, placement_mode=mode)
         G_world = self.geometry.world_coord(lane, d_m, lateral_shift=-LATERAL_SHIFT, z=VERTICAL_LIFT)
         G_img = self.projector.project(G_world)
         return GraphicAnchor(world=G_world, image=G_img, offset_ahead=0, placement_mode="fallback")

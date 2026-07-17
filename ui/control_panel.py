@@ -92,12 +92,16 @@ class ControlPanel:
         elif key == ord('f'):
             self.pipeline.dynamic_camera.follow_mode = not self.pipeline.dynamic_camera.follow_mode
             if not self.pipeline.dynamic_camera.follow_mode:
-                self.pipeline.projector.look_at(WorldCoord(50.0, 4.88, 0.0))
+                proj = getattr(self.pipeline.dynamic_camera, '_render_proj', self.pipeline.projector)
+                geom = self.pipeline.geometry
+                proj.look_at(WorldCoord(geom.length / 2, geom.lane_center_y(4.5), 0.0))
         elif key == ord('r'):
             self.pipeline.reset()
             self.pipeline.dynamic_camera.prev_look_x = None
             if not self.pipeline.dynamic_camera.follow_mode:
-                self.pipeline.projector.look_at(WorldCoord(50.0, 4.88, 0.0))
+                proj = getattr(self.pipeline.dynamic_camera, '_render_proj', self.pipeline.projector)
+                geom = self.pipeline.geometry
+                proj.look_at(WorldCoord(geom.length / 2, geom.lane_center_y(4.5), 0.0))
             if self.on_reset:
                 self.on_reset()
         elif key == ord('q'):

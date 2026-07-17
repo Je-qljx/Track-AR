@@ -19,24 +19,20 @@ class Projector:
     def set_calibration_world_pts(self, world_pts: list[WorldCoord]):
         self._calib_world_pts = np.array([w.as_array for w in world_pts], dtype=np.float64)
 
-    def track_homography(self, H: np.ndarray | None, min_displacement_px: float = 0.0) -> bool:
+    def track_homography(self, H: np.ndarray | None, min_displacement_px: float = 0.5) -> bool:
         """Update camera extrinsics from tracked homography H (calib frame → current frame).
            Projects the calibration world points through the current extrinsics,
            warps through H, then re-solves PnP to recover the updated 6-DOF pose.
-           Returns True if pose was updated."""
+           Returns True if pose was actually updated."""
         if H is None or self.rvec is None or self.tvec is None or self._calib_world_pts is None:
             return False
-        # 1. Project calibration world points through current extrinsics
         calib_2d, _ = cv2.projectPoints(
             self._calib_world_pts, self.rvec, self.tvec,
             self.camera_matrix, self.dist_coeffs)
-        # 2. Warp through homography to current frame
         current_2d = cv2.perspectiveTransform(calib_2d, H)
-        # 3. Check actual pixel displacement — skip near-identity (prevents drift)
         displacement = float(np.sqrt(np.mean(np.sum((current_2d - calib_2d) ** 2, axis=2))))
         if displacement < min_displacement_px:
-            return True  # no significant motion, keep current pose
-        # 4. Solve PnP to recover new pose
+            return False
         ret, rvec, tvec = cv2.solvePnP(
             self._calib_world_pts, current_2d,
             self.camera_matrix, self.dist_coeffs,

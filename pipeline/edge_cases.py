@@ -74,6 +74,7 @@ class EdgeCaseDetector:
     def check_all(self, athletes: dict[int, AthleteState],
                   positions: list) -> dict[int, list[AthleteAlert]]:
         alerts: dict[int, list[AthleteAlert]] = {}
+        pos_by_lane = {p.lane: p for p in positions}
         for lane, athlete in athletes.items():
             lane_alerts = []
             fallen = self.check_fallen(athlete)
@@ -82,6 +83,11 @@ class EdgeCaseDetector:
             finish = self.check_finish_line(athlete)
             if finish:
                 lane_alerts.append(finish)
+            pos = pos_by_lane.get(lane)
+            if pos is not None:
+                speed_alert = self.check_speed_anomaly(athlete, pos.speed_mps)
+                if speed_alert:
+                    lane_alerts.append(speed_alert)
             if lane_alerts:
                 alerts[lane] = lane_alerts
         return alerts

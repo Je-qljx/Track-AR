@@ -34,5 +34,4 @@ class GraphicContent:
         }
         color = lane_colors.get(self.lane, (255, 255, 255))
         cv2.rectangle(overlay, (2, 2), (width - 3, height - 3), (int(color[2]), int(color[1]), int(color[0]), 100), 3)
-        canvas = cv2.addWeighted(canvas, 0, overlay, 1, 0)
-        return canvas
+        return overlay

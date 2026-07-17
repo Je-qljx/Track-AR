@@ -53,7 +53,6 @@ def main():
     print("=" * 50)
     video_path = generate_test_video()
     print("\nInitializing pipeline...")
-    pipeline = TrackARPipeline()
     K = np.array([[800, 0, 960], [0, 800, 540], [0, 0, 1]], dtype=np.float64)
     geom = TrackGeometry()
     pipeline = TrackARPipeline(camera_matrix=K)

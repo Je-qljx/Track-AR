@@ -1,7 +1,5 @@
 # TrackAR
 
-
-
 [![Python](https://img.shields.io/badge/Python-3.12-blue?style=flat-square&logo=python)](https://python.org)
 [![OpenCV](https://img.shields.io/badge/OpenCV-5.0-5c3c8c?style=flat-square&logo=opencv)](https://opencv.org)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-00c853?style=flat-square)](https://ultralytics.com)
@@ -15,11 +13,11 @@ TrackAR is a computer vision system that adds real-time AR overlays to track & f
 ## Features
 
 - **Dual track support** — 100m straight sprint and IAAF-standard 400m oval with staggered starts and per-lane finish distances
-- **PnP camera calibration** — Standard 4-point calibration (start/finish line intersections) or target mode (any known-size object at any position on the track)
+- **PnP camera calibration** — Standard 4-point calibration (start/finish line intersections) or target mode (any known-size object at any position on the track with tangent-space rectangle for 400m curves)
 - **Real-time camera tracking** — KLT optical flow tracks track-surface features frame-to-frame; USAC_MAGSAC homography feeds PnP to update 6-DOF camera pose without drift
-- **Athlete detection** — YOLOv8 person detection with fallback dummy detector for synthetic testing
+- **Athlete detection** — YOLOv8 person detection (~115 fps on RTX 5070) with fallback dummy detector for synthetic testing
 - **Lane assignment** — Vectorized nearest-neighbor matching with 2-frame pending confirmation, Kalman prediction-guided search, non-maximum suppression (NMS), and track-region filtering
-- **Kalman filtering** — 3-state (pos/vel/acc) constant-acceleration model with adaptive measurement noise
+- **Kalman filtering** — 3-state (pos/vel/acc) constant-acceleration model with adaptive measurement noise, velocity clamp (±15 m/s), and position clamp
 - **Occlusion-safe graphics** — Anchors placed ahead, behind, or laterally to ensure AR labels never cover athletes
 - **Leaderboard standings** — Per-lane finish-time tracking with video-timestamp-based race timer
 - **Cross-frame calibration** — Calibrate across multiple frames when start/finish aren't visible together; ORB feature matching rectifies points before PnP
@@ -37,7 +35,7 @@ Frame in → Preprocessor → Camera Tracker (KLT) → PnP Pose Update
                          YOLO Detection → Lane Assignment → Position Estimation
                                                                 ↓
          Race Timer ⬄ Ranking ← Position Smoothing ← Edge Detection
-                                ↓
+                                                                ↓
        Occlusion Guard → Decal Render → Standings Panel → Debug Overlay
                                                                ↓
                                                           Frame out
@@ -80,13 +78,13 @@ python trackar_gui.py
 The GUI provides:
 
 - Video file browser with track type selection (100m / 400m)
-- Camera focal length slider
+- Camera focal length slider (24-800mm full-frame equivalent)
 - Standard 4-point calibration or calibration target mode (set width, height, distance mark, lane)
 - Click-based calibration with cross-frame ORB rectification
 - YOLO toggle
 - Processing progress and output viewer
 
-**Calibration target mode** is recommended for telephoto shots where start and finish aren't visible together. Place a known-size object (A4 paper, cardboard box) at a known position before the race, click its 4 corners, then remove it — calibration complete.
+**Calibration target mode** is recommended for telephoto shots where start and finish aren't visible together. Place a known-size object (A4 paper, cardboard box) at a known position before the race, click its 4 corners, then remove it — calibration complete. On 400m curved tracks, the corners are computed in the local tangent plane for correct PnP.
 
 **Standard mode** works when a single frame shows both start and finish lines. Click the 4 track-line intersections (Start×Lane1, Start×Lane8, Finish×Lane1, Finish×Lane8).
 
@@ -114,11 +112,11 @@ Keyboard controls during demo:
 ### Real Video Processing
 
 ```bash
-python run_real_video.py --video path/to/video.mp4 --track 100m
-python run_real_video.py --video path/to/video.mp4 --track 400m --fx 2000
+python run_real_video.py race_video.mp4 --track 100m
+python run_real_video.py race_video.mp4 --track 400m --fx 2000
 ```
 
-Options include `--fx` (focal length), `--no-yolo` (use dummy detector), `--output` (output path), `--max-frames` (limit frames).
+Options include `--fx` (focal length in pixels), `--focal-mm` (35mm equivalent), `--no-yolo` (fallback to dummy detector), `--output` (output path), `--max-frames` (limit processing), `--track-type` (100m/400m).
 
 ---
 
@@ -139,7 +137,7 @@ Test suite: **35/35 passing**
 | Full-race boom           | 2     | Boom up/down during 100m race                                                                     |
 | Full-race zoom/dolly     | 4     | Zoom and dolly during 100m race                                                                   |
 
-> **Note:** 100m zoom and dolly tests have relaxed tolerances (1.5s / 0.5s) due to PnP depth ambiguity on near-field cameras (z=36m). 400m tests at z=90m pass within 0.2s for all motion types.
+> **Note:** 100m zoom and dolly tests have relaxed tolerances (1.5s / 0.5s) due to PnP depth ambiguity on near-field cameras (z=36 m). 400m tests at z=90 m pass within 0.2 s for all motion types.
 
 ---
 
@@ -182,7 +180,6 @@ track_ar/
 │   ├── decal_renderer.py        # AR overlay rendering with alpha blending
 │   ├── graphic_factory.py       # Rank/time texture generation
 │   ├── occlusion_guard.py       # Safe anchor placement (ahead/behind/lateral)
-│   ├── depth_sorter.py          # Z-ordering by distance from camera
 │   └── debug_overlay.py         # Detection bbox and anchor visualization
 │
 ├── ui/
@@ -213,16 +210,19 @@ track_ar/
 
 ## Key Technical Details
 
-| Component            | Detail                                                                                                                                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **GPU**              | RTX 5070 Laptop (12 GB, sm_120) — PyTorch 2.12 nightly + CUDA 12.8                                                                                                                                     |
-| **YOLO pipeline**    | ~115 fps at yolov8s; graceful fallback to `DummyDetector`                                                                                                                                              |
-| **Camera tracking**  | KLT at 640×360, 400 features, quality=0.005, min_distance=3px, redetect every 60 frames; USAC_MAGSAC (3.0 reproj) homography                                                                           |
-| **PnP**              | `solvePnPRansac` (ITERATIVE) with dense ~330-point tracking grid; no extrinsic guess to avoid local minima                                                                                             |
-| **400m track model** | IAAF standard: inner-edge radius 36.5 m, lane width 1.22 m, straight 84.39 m; per-lane curve arcs, stagger offsets, and finish distances                                                               |
-| **Race timer**       | Video-timestamp-based (not wall clock); starts when ≥2 athletes pass 0.5 m; stops when all 8 lanes finished                                                                                            |
-| **Lane assignment**  | Vectorized NumPy nearest-neighbor; 2-frame pending-track confirmation; NMS (IoU ≥ 0.85); track-region filtering for spectator rejection (100m); fallback re-acquisition with relaxed thresholds (400m) |
-| **Occlusion guard**  | Places graphic anchors 2.0 m ahead (default), with behind (1.0 m) and lateral (0.4 m) fallbacks; bbox collision check ensures zero athlete overlap                                                     |
+| Component              | Detail                                                                                                                                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **GPU**                | RTX 5070 Laptop (12 GB, sm_120) — PyTorch 2.12 nightly + CUDA 12.8                                                                                                                                       |
+| **YOLO pipeline**      | ~115 fps at yolov8s; graceful fallback to `DummyDetector`                                                                                                                                                |
+| **Camera tracking**    | KLT at 640×360, 400 features, quality=0.005, min_distance=3 px, redetect every 60 frames; USAC_MAGSAC (3.0 reproj) homography; INTER_NEAREST downscale                                                  |
+| **PnP**                | `solvePnPRansac` (ITERATIVE) with dense ~330-point tracking grid; no extrinsic guess to avoid local minima; batch projection for 30× performance gain on image cache rebuild                            |
+| **400m track model**   | IAAF standard: inner-edge radius 36.5 m, lane width 1.22 m, straight 84.39 m; per-lane curve arcs, stagger offsets, and finish distances                                                                 |
+| **Calibration target** | `TrackGeometry.calibration_target_points()` computes tangent-space rectangle for proper PnP on curved 400m tracks; supports any lane/dm position                                                          |
+| **Image cache**        | Batch `projectPoints` with frame-count guard to avoid redundant rebuilds; ~10 ms/frame on 400m tracks (was ~310 ms)                                                                                      |
+| **Race timer**         | Video-timestamp-based (not wall clock); starts when ≥2 athletes pass 0.5 m; stops when all 8 lanes finished                                                                                              |
+| **Lane assignment**    | Vectorized NumPy nearest-neighbor; 2-frame pending-track confirmation; NMS (IoU ≥ 0.85); track-region filtering for spectator rejection (100m); fallback re-acquisition with relaxed thresholds (400m)   |
+| **Kalman filter**      | 3-state (pos/vel/acc) constant-acceleration; velocity clamp ±15 m/s; position forced to measurement after update; adaptive measurement noise based on tracking confidence                                |
+| **Occlusion guard**    | Places graphic anchors 2.0 m ahead (default), with behind (1.0 m) and lateral (0.4 m) fallbacks; bbox collision check ensures zero athlete overlap                                                       |
 
 ---
 

@@ -96,16 +96,12 @@ class TrackGeometry:
         return np.hypot(dx, dy)
 
     def _project_to_image(self, x: float, y: float, projector) -> tuple[float, float]:
-        from calibration.projector import Projector
         wc = WorldCoord(x, y, 0.0)
         ic = projector.project(wc)
         return ic.u, ic.v
 
     def _build_image_cache(self, projector):
         if self._model is None:
-            return
-        cache_id = id(projector)
-        if getattr(self, '_img_cache_id', None) == cache_id:
             return
         step = 2.0
         rd = self._model.race_distance()
@@ -120,7 +116,6 @@ class TrackGeometry:
                 samples.append((dm, u, v))
             img_samples[lane] = samples
         self._img_cache = img_samples
-        self._img_cache_id = cache_id
 
     def find_lane_dm_from_image(self, u: float, v: float, projector, max_dist_px: float = 150.0) -> tuple[int, float]:
         if self._model is None:
@@ -141,6 +136,15 @@ class TrackGeometry:
     def race_length(self) -> float:
         return self.length
 
+    def build_tracking_grid(self, step: float = 10.0) -> list[WorldCoord]:
+        pts = []
+        for lane in range(1, 9):
+            d_m = 0.0
+            while d_m <= self.length:
+                pts.append(self.world_coord(lane, d_m, lateral_shift=0.0, z=0.0))
+                d_m += step
+        return pts
+
     def finish_distance(self, lane: int) -> float:
         if self._model is not None:
             return self._model.race_distance()
@@ -148,7 +152,8 @@ class TrackGeometry:
 
     def calibration_world_points(self) -> list[WorldCoord]:
         """Returns 4 world coords for PnP calibration:
-           [Start×Lane1, Start×Lane8, Finish×Lane1, Finish×Lane8]"""
+           100m: [Start×Lane1, Start×Lane8, Finish×Lane1, Finish×Lane8]
+           400m: [Start×Lane1, Start×Lane8, far-straight-end×L1, far-straight-end×L8]"""
         start_l1 = self.world_coord(1, 0.0)
         start_l8 = self.world_coord(8, 0.0)
         if self._model is not None:
@@ -162,20 +167,47 @@ class TrackGeometry:
             finish_l8 = self.world_coord(8, self.length)
         return [start_l1, start_l8, finish_l1, finish_l8]
 
+    def calibration_target_points(self, lane: int, dm: float, w: float, h: float, eps: float = 0.1) -> list[WorldCoord]:
+        """4 corners of a w×h rectangle centered at (lane, dm), tangent to the track."""
+        if self._model is None:
+            cy = self.lane_center_y(lane)
+            return [
+                WorldCoord(dm - w/2, cy - h/2, 0.0),
+                WorldCoord(dm + w/2, cy - h/2, 0.0),
+                WorldCoord(dm + w/2, cy + h/2, 0.0),
+                WorldCoord(dm - w/2, cy + h/2, 0.0),
+            ]
+        center = self.world_coord(lane, dm)
+        fwd = self.world_coord(lane, dm + eps)
+        back = self.world_coord(lane, dm - eps)
+        dx = fwd.x - back.x
+        dy = fwd.y - back.y
+        norm = np.hypot(dx, dy)
+        if norm < 1e-6:
+            dx, dy = 1.0, 0.0
+            norm = 1.0
+        tx, ty = dx / norm, dy / norm
+        nx, ny = -ty, tx
+        cx, cy = center.x, center.y
+        return [
+            WorldCoord(cx - tx*w/2 - nx*h/2, cy - ty*w/2 - ny*h/2, 0.0),
+            WorldCoord(cx + tx*w/2 - nx*h/2, cy + ty*w/2 - ny*h/2, 0.0),
+            WorldCoord(cx + tx*w/2 + nx*h/2, cy + ty*w/2 + ny*h/2, 0.0),
+            WorldCoord(cx - tx*w/2 + nx*h/2, cy - ty*w/2 + ny*h/2, 0.0),
+        ]
+
+    def calibration_point_labels(self) -> list[str]:
+        if self._model is not None:
+            return ["起点×道1", "起点×道8", "对面直道尽头×道1", "对面直道尽头×道8"]
+        return ["起跑线×道1", "起跑线×道8", "终点线×道1", "终点线×道8"]
+
     def reference_points_world(self) -> list[tuple[str, WorldCoord]]:
         calib = self.calibration_world_points()
-        if self._model is not None:
-            return [
-                ("start_lane1", calib[0]),
-                ("start_lane8", calib[1]),
-                ("finish_lane1", calib[2]),
-                ("finish_lane8", calib[3]),
-                ("mid_lane4", self.world_coord(4, self.length / 2)),
-            ]
+        labels = self.calibration_point_labels()
         return [
-            ("start_lane1", calib[0]),
-            ("start_lane8", calib[1]),
-            ("finish_lane1", calib[2]),
-            ("finish_lane8", calib[3]),
+            (labels[0], calib[0]),
+            (labels[1], calib[1]),
+            (labels[2], calib[2]),
+            (labels[3], calib[3]),
             ("mid_lane4", self.world_coord(4, self.length / 2)),
         ]

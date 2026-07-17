@@ -46,7 +46,12 @@ def main():
     proj, _ = cv2.projectPoints(w_arr, rvec, tvec, K, np.zeros((4, 1)))
     i_pts = [ImageCoord(float(p[0, 0]), float(p[0, 1])) for p in proj]
     pipeline.calibrate_from_points(w_pts, i_pts)
-    scene = SyntheticScene(pipeline.projector, geom, speeds=speeds)
+    # Use a separate projector for scene rendering so follow-mode camera
+    # modifications don't affect tracking
+    render_proj = Projector(K)
+    render_proj.set_extrinsics(rvec.copy(), tvec.copy())
+    scene = SyntheticScene(render_proj, geom, speeds=speeds)
+    pipeline.dynamic_camera._render_proj = render_proj
     for lane in range(1, 9):
         pipeline.set_athlete_name(lane, f"Athlete {lane}")
     print("[OK] Pipeline initialized and calibrated")
@@ -71,19 +76,29 @@ def main():
             if key > 0:
                 control.handle_key(key)
             continue
-        t = frame_idx / 60.0
-        athletes = scene.update(t)
-        canvas = scene.render(athletes)
-        detections = scene.get_detections(athletes)
-        output = pipeline.process_frame(canvas, timestamp=t, external_detections=detections)
-        if control.state.overlay_enabled:
-            control.draw_controls(output)
-        cv2.imshow("TrackAR Demo", output)
-        key = cv2.waitKey(1) & 0xFF
-        if key > 0:
-            if not control.handle_key(key):
-                pipeline.running = False
-        frame_idx += 1
+            t = frame_idx / 60.0
+            athletes = scene.update(t)
+            # Sync render projector with current tracking pose + follow adjustments
+            render_proj.set_extrinsics(pipeline.projector.rvec.copy(), pipeline.projector.tvec.copy())
+            if pipeline.dynamic_camera.follow_mode and hasattr(pipeline.dynamic_camera, '_render_proj'):
+                dc = pipeline.dynamic_camera
+                look_x = dc.compute_look_x(pipeline._last_positions if hasattr(pipeline, '_last_positions') else [], pipeline.geometry.length)
+                if dc.prev_look_x is None:
+                    dc.prev_look_x = look_x
+                dc.prev_look_x += (look_x - dc.prev_look_x) * dc.SMOOTH_ALPHA
+                geom = pipeline.geometry
+                render_proj.look_at(WorldCoord(dc.prev_look_x, geom.lane_center_y(4.5), 0.0))
+            canvas = scene.render(athletes)
+            detections = scene.get_detections(athletes)
+            output = pipeline.process_frame(canvas, timestamp=t, external_detections=detections)
+            if control.state.overlay_enabled:
+                control.draw_controls(output)
+            cv2.imshow("TrackAR Demo", output)
+            key = cv2.waitKey(1) & 0xFF
+            if key > 0:
+                if not control.handle_key(key):
+                    pipeline.running = False
+            frame_idx += 1
         if frame_idx > max_frames:
             frame_idx = 0
     cv2.destroyAllWindows()

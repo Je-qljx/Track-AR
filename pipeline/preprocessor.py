@@ -12,9 +12,8 @@ class PreprocessedFrame:
 
 
 class Preprocessor:
-    def __init__(self, target_size: int = 640, enable_undistortion: bool = True):
+    def __init__(self, target_size: int = 640):
         self.target_size = target_size
-        self.enable_undistortion = enable_undistortion
         self.frame_count = 0
 
     def process(self, frame: np.ndarray, timestamp: float) -> PreprocessedFrame:

@@ -25,15 +25,15 @@ class Calibrator:
     def solve_pnp(self, world_pts: list[WorldCoord], image_pts: list[ImageCoord]) -> tuple[np.ndarray, np.ndarray]:
         w_pts = np.array([w.as_array for w in world_pts], dtype=np.float64)
         i_pts = np.array([[i.u, i.v] for i in image_pts], dtype=np.float64)
-        # Use RANSAC for robustness; fall back to standard solvePnP on failure
-        ret, rvec, tvec, _ = cv2.solvePnPRansac(
-            w_pts, i_pts, self.camera_matrix, self.dist_coeffs,
-            iterationsCount=2000, reprojectionError=8.0, confidence=0.99,
-        )
-        if not ret:
+        if len(world_pts) <= 6:
             ret, rvec, tvec = cv2.solvePnP(w_pts, i_pts, self.camera_matrix, self.dist_coeffs)
-            if not ret:
-                raise RuntimeError("solvePnP failed. Check reference points.")
+        else:
+            ret, rvec, tvec, _ = cv2.solvePnPRansac(
+                w_pts, i_pts, self.camera_matrix, self.dist_coeffs,
+                iterationsCount=2000, reprojectionError=8.0, confidence=0.99,
+            )
+        if not ret:
+            raise RuntimeError("solvePnP failed. Check reference points.")
         self.rvec = rvec
         self.tvec = tvec
         return rvec, tvec
@@ -56,13 +56,14 @@ class Calibrator:
         errors = np.sqrt(np.sum((i_pts - proj_pts[:, 0]) ** 2, axis=1))
         return [float(e) for e in errors]
 
-    def print_calibration_debug(self, world_pts: list[WorldCoord], image_pts: list[ImageCoord]):
+    def print_calibration_debug(self, world_pts: list[WorldCoord], image_pts: list[ImageCoord], labels: list[str] | None = None):
         w_pts = np.array([w.as_array for w in world_pts], dtype=np.float64)
         i_pts = np.array([[i.u, i.v] for i in image_pts], dtype=np.float64)
         proj_pts, _ = cv2.projectPoints(w_pts, self.rvec, self.tvec, self.camera_matrix, self.dist_coeffs)
-        names = ["Start x Lane1", "Start x Lane8", "Finish x Lane1", "Finish x Lane8"]
+        if labels is None:
+            labels = ["Start×L1", "Start×L8", "Finish×L1", "Finish×L8"]
         print("  Per-point reprojection errors:")
-        for name, w, ip, pp in zip(names, w_pts, i_pts, proj_pts[:, 0]):
+        for name, w, ip, pp in zip(labels, w_pts, i_pts, proj_pts[:, 0]):
             err = np.hypot(ip[0] - pp[0], ip[1] - pp[1])
             print(f"    {name}: world=({w[0]:.1f},{w[1]:.2f},{w[2]:.1f})  "
                   f"click=({ip[0]:.0f},{ip[1]:.0f})  "

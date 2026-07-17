@@ -23,11 +23,13 @@ class StandingsPanel:
              positions: list[AthletePosition], timer: RaceTimer,
              athlete_names: dict[int, str], geometry_length: float = 100.0,
              video_timestamp: float | None = None,
-             finish_distances: dict[int, float] | None = None):
+             finish_distances: dict[int, float] | None = None,
+             finish_tolerance_m: float = 0.5):
         h, w = canvas.shape[:2]
         for pos in positions:
             fd = finish_distances.get(pos.lane, geometry_length) if finish_distances is not None else geometry_length
-            if pos.d_m >= fd - 0.5 and pos.lane not in self.finish_times and timer.race_started and pos.confidence > 0.0:
+            d_rel = pos.d_m
+            if d_rel >= fd - finish_tolerance_m and pos.lane not in self.finish_times and timer.race_started and pos.confidence > 0.0:
                 self.finish_times[pos.lane] = timer.get_elapsed(video_timestamp)
 
         elapsed = timer.get_elapsed(video_timestamp) if timer.race_started else 0.0

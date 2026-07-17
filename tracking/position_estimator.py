@@ -16,6 +16,8 @@ class AthletePosition:
     timestamp: float
     frame_count: int
     confidence: float = 0.0
+    dm_min: float = 0.0
+    distance_traveled: float = 0.0
 
 
 class PositionEstimator:
@@ -39,21 +41,23 @@ class PositionEstimator:
 
             if prev is not None:
                 dt = timestamp - prev.timestamp
-                if dt > 0:
-                    speed = (raw_dm - prev.d_m) / dt
-
-                if state.frames_missed > 0:
-                    confidence = max(0.0, 1.0 - state.frames_missed * 0.2)
+                if dt <= 0:
+                    speed = 0.0
+                    confidence = 1.0 if state.frames_missed == 0 else max(0.0, 1.0 - state.frames_missed * 0.2)
                 else:
-                    jump = abs(raw_dm - prev.d_m)
-                    if jump > self.MAX_JUMP_M and prev.d_m > 1.0:
-                        expected_speed = prev.speed_mps
-                        expected_jump = expected_speed * dt
-                        max_allowed = max(expected_jump + 2.0, self.MAX_JUMP_M)
-                        if jump > max_allowed:
-                            raw_dm = prev.d_m + np.sign(raw_dm - prev.d_m) * max_allowed
-                            speed = expected_speed
-                            confidence = 0.3
+                    speed = (raw_dm - prev.d_m) / dt
+                    if state.frames_missed > 0:
+                        confidence = max(0.0, 1.0 - state.frames_missed * 0.2)
+                    else:
+                        jump = abs(raw_dm - prev.d_m)
+                        if jump > self.MAX_JUMP_M and self.frame_count > 10:
+                            expected_speed = prev.speed_mps
+                            expected_jump = expected_speed * dt
+                            max_allowed = max(expected_jump + 2.0, self.MAX_JUMP_M)
+                            if jump > max_allowed:
+                                raw_dm = prev.d_m + np.sign(raw_dm - prev.d_m) * max_allowed
+                                speed = expected_speed
+                                confidence = 0.3
 
             speed = np.clip(speed, -self.MAX_SPEED_MPS, self.MAX_SPEED_MPS)
             raw_dm = np.clip(raw_dm, 0.0, self.geometry.length)
@@ -67,6 +71,8 @@ class PositionEstimator:
                 timestamp=timestamp,
                 frame_count=self.frame_count,
                 confidence=confidence,
+                dm_min=state.dm_min,
+                distance_traveled=state.distance_traveled,
             )
             positions.append(pos)
             self.prev_positions[lane] = pos

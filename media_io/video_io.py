@@ -25,6 +25,8 @@ class VideoInput:
 
     def open(self, source: VideoSource | str):
         uri = source if isinstance(source, str) else source.uri
+        if self.cap is not None:
+            self.cap.release()
         self.cap = cv2.VideoCapture(uri)
         if not self.cap.isOpened():
             raise RuntimeError(f"Failed to open video source: {uri}")
@@ -36,8 +38,12 @@ class VideoInput:
         self.thread.start()
 
     def _read_loop(self):
-        while self.running and self.cap:
-            ret, frame = self.cap.read()
+        while self.running:
+            with self.lock:
+                cap = self.cap
+            if cap is None:
+                break
+            ret, frame = cap.read()
             if not ret:
                 self.running = False
                 break

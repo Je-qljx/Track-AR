@@ -50,6 +50,8 @@ class LaneKalmanFilter:
         if not self.initialized:
             return
         self.x = self.F @ self.x
+        self.x[1, 0] = np.clip(self.x[1, 0], -15.0, 15.0)
+        self.x[0, 0] = max(0.0, self.x[0, 0])
         self.P = self.F @ self.P @ self.F.T + self.Q
 
     def update(self, x_meas: float | np.ndarray, confidence: float = 1.0):
@@ -64,11 +66,13 @@ class LaneKalmanFilter:
         y = z - self.H @ self.x
         S = self.H @ self.P @ self.H.T + R
         K = self.P @ self.H.T @ np.linalg.inv(S)
-        # Innovation gating: reject updates with >3-sigma innovation
         innovation = float(y[0, 0])
         sigma = float(np.sqrt(S[0, 0]))
-        if abs(innovation) > 3.0 * sigma:
-            return
+        innovation_mahal = abs(innovation) / max(sigma, 1e-6)
+        if innovation_mahal > 3.0:
+            R = R * (innovation_mahal / 3.0)
+            S = self.H @ self.P @ self.H.T + R
+            K = self.P @ self.H.T @ np.linalg.inv(S)
         self.x = self.x + K @ y
         self.P = (np.eye(3, dtype=np.float64) - K @ self.H) @ self.P
         self.x[1, 0] = np.clip(self.x[1, 0], -15.0, 15.0)

@@ -14,7 +14,8 @@ from calibration.coords import TrackGeometry, WorldCoord, ImageCoord
 from calibration.frame_tracker import FrameTracker
 from pipeline.main_pipeline import TrackARPipeline
 
-CALIB_NAMES = ["起跑线×道1", "起跑线×道8", "终点线×道1", "终点线×道8"]
+CALIB_NAMES_100M = ["起跑线×道1", "起跑线×道8", "终点线×道1", "终点线×道8"]
+CALIB_NAMES_400M = ["起点×道1", "起点×道8", "对面直道尽头×道1", "对面直道尽头×道8"]
 CALIB_TARGET_NAMES = [
     "起跑线侧·内道侧 (S-in)",
     "终点线侧·内道侧 (F-in)",
@@ -230,10 +231,11 @@ class TrackARApp:
             return
         self.demo_btn.config(state="disabled")
         self.log("启动演示模式...")
-        thread = threading.Thread(target=self._run_demo, daemon=True)
+        track_type = self.track_var.get()
+        thread = threading.Thread(target=self._run_demo, args=(track_type,), daemon=True)
         thread.start()
 
-    def _run_demo(self):
+    def _run_demo(self, track_type: str = "100m"):
         self._demo_running = True
         import numpy as np
         import cv2
@@ -242,7 +244,6 @@ class TrackARApp:
         from ui.control_panel import ControlPanel
         from tests.synthetic_scene import SyntheticScene
 
-        track_type = self.track_var.get()
         is_400m = track_type == "400m"
         K = np.array([[700, 0, 960], [0, 700, 540], [0, 0, 1]], dtype=np.float64)
         geom = TrackGeometry(track_type=track_type)
@@ -260,10 +261,14 @@ class TrackARApp:
             tvec = np.array([[-40.827], [-14.574], [36.127]], dtype=np.float64)
         world_pts = geom.calibration_world_points()
         w_arr = np.array([w.as_array for w in world_pts], dtype=np.float64)
-        proj, _ = cv2.projectPoints(w_arr, rvec, tvec, K, np.zeros((4, 1)))
-        image_pts = [ImageCoord(float(p[0, 0]), float(p[0, 1])) for p in proj]
+        proj_pts, _ = cv2.projectPoints(w_arr, rvec, tvec, K, np.zeros((4, 1)))
+        image_pts = [ImageCoord(float(p[0, 0]), float(p[0, 1])) for p in proj_pts]
         pipeline.calibrate_from_points(world_pts, image_pts)
-        scene = SyntheticScene(pipeline.projector, geom, speeds=speeds)
+        # Separate render projector so follow-mode doesn't affect tracking
+        render_proj = Projector(K)
+        render_proj.set_extrinsics(rvec.copy(), tvec.copy())
+        scene = SyntheticScene(render_proj, geom, speeds=speeds)
+        pipeline.dynamic_camera._render_proj = render_proj
         for lane in range(1, 9):
             pipeline.set_athlete_name(lane, f"选手{lane}")
         self.window.after(0, self.log, f"演示模式：8名运动员，{track_type}")
@@ -285,6 +290,16 @@ class TrackARApp:
                 continue
             t = frame_idx / 60.0
             athletes = scene.update(t)
+            # Sync render projector: start from tracking pose, apply follow if active
+            render_proj.set_extrinsics(pipeline.projector.rvec.copy(), pipeline.projector.tvec.copy())
+            if pipeline.dynamic_camera.follow_mode:
+                dc = pipeline.dynamic_camera
+                look_x = dc.compute_look_x(pipeline._last_positions if hasattr(pipeline, '_last_positions') else [], pipeline.geometry.length)
+                if dc.prev_look_x is None:
+                    dc.prev_look_x = look_x
+                dc.prev_look_x += (look_x - dc.prev_look_x) * dc.SMOOTH_ALPHA
+                geom = pipeline.geometry
+                render_proj.look_at(WorldCoord(dc.prev_look_x, geom.lane_center_y(4.5), 0.0))
             canvas = scene.render(athletes)
             detections = scene.get_detections(athletes)
             output = pipeline.process_frame(canvas, timestamp=t, external_detections=detections)
@@ -368,17 +383,22 @@ class TrackARApp:
         scale_x = w / disp_w
         scale_y = h / disp_h
 
-        def _names():
-            return CALIB_TARGET_NAMES if _use_target_names else CALIB_NAMES
+        def _calib_names():
+            if _use_target_names:
+                return CALIB_TARGET_NAMES
+            if self.track_var.get() == "400m":
+                return CALIB_NAMES_400M
+            return CALIB_NAMES_100M
 
         TARGET_DESC = "标定物4角顺序: ①起跑线侧·内道侧→②终点线侧·内道侧→③终点线侧·外道侧→④起跑线侧·外道侧"
-        STANDARD_DESC = "4点顺序: ①起跑线×道1→②起跑线×道8→③终点线×道1→④终点线×道8"
+        STANDARD_DESC_100M = "4点顺序: ①起跑线×道1→②起跑线×道8→③终点线×道1→④终点线×道8"
+        STANDARD_DESC_400M = "4点顺序: ①起点×道1→②起点×道8→③对面直道尽头×道1→④对面直道尽头×道8"
 
         def _make_display():
             if frame[0] is None:
                 return
             d = cv2.resize(frame[0], (disp_w, disp_h))
-            names = _names()
+            names = _calib_names()
             for i, (px, py) in enumerate(points):
                 dx, dy = int(px / scale_x), int(py / scale_y)
                 cv2.circle(d, (dx, dy), 8, CALIB_COLORS[i], -1)
@@ -387,7 +407,7 @@ class TrackARApp:
                 cv2.putText(d, names[i], (dx + 10, dy + 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, CALIB_COLORS[i], 1)
             y_off = 60
-            desc = TARGET_DESC if _use_target_names else STANDARD_DESC
+            desc = TARGET_DESC if _use_target_names else (STANDARD_DESC_400M if self.track_var.get() == "400m" else STANDARD_DESC_100M)
             cv2.putText(d, desc, (30, y_off),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
             y_off += 35
@@ -449,11 +469,15 @@ class TrackARApp:
         self.calib_pixels = points
         self.calib_frames = calib_frames
         self.calib_frame_idxs = calib_frame_idxs
-        def _names():
-            return CALIB_TARGET_NAMES if _use_target_names else CALIB_NAMES
+        def _calib_names2():
+            if _use_target_names:
+                return CALIB_TARGET_NAMES
+            if self.track_var.get() == "400m":
+                return CALIB_NAMES_400M
+            return CALIB_NAMES_100M
 
         self.calibrate_btn.config(text="标定完成  ✓", state="normal")
-        names_at_confirm = _names()
+        names_at_confirm = _calib_names2()
         self.calib_label.config(text="标定: 4点已设置", foreground="green")
         self.start_btn.config(state="normal")
         self.log("[标定] 4点确认完毕:")
@@ -511,8 +535,8 @@ class TrackARApp:
             # Use full resolution + more features for cross-frame matching
             # (downscale to 640px loses fine details for 100m-apart views)
             ref_gray = cv2.cvtColor(self.calib_frames[0], cv2.COLOR_BGR2GRAY)
-            ft = FrameTracker(max_width=max(ref_gray.shape[1], 1920))
-            ft.orb = cv2.ORB.create(nfeatures=8000, scaleFactor=1.5, nlevels=12)
+            ft = FrameTracker(max_width=1280)
+            ft.orb = cv2.ORB.create(nfeatures=3000, scaleFactor=1.2, nlevels=8)
             ft.set_reference(ref_gray)
             ref_kp_count = len(ft._first_kp)
             self.log(f"  Reference frame (click 1): frame #{self.calib_frame_idxs[0]}, {ref_kp_count} ORB features (full res)")
@@ -525,7 +549,8 @@ class TrackARApp:
                     float(self.calib_pixels[i][0]), float(self.calib_pixels[i][1]))
                 rectified_pixels.append((int(round(u)), int(round(v))))
                 info = ft.last_match_info
-                self.log(f"  点{i+1} ({CALIB_NAMES[i]}):")
+                calib_name_i = CALIB_NAMES_100M if track_type == "100m" else CALIB_NAMES_400M
+                self.log(f"  点{i+1} ({calib_name_i[i]}):")
                 self.log(f"    来自帧: #{self.calib_frame_idxs[i]}")
                 self.log(f"    点击位置: ({self.calib_pixels[i][0]}, {self.calib_pixels[i][1]})")
                 self.log(f"    配准后:   ({int(round(u))}, {int(round(v))})")
@@ -557,18 +582,18 @@ class TrackARApp:
             w_t = self.target_w_var.get()
             h_t = self.target_h_var.get()
             cy = geom.lane_center_y(lane)
-            world_pts = [
-                WorldCoord(dm - w_t/2, cy - h_t/2, 0.0),  # BL
-                WorldCoord(dm + w_t/2, cy - h_t/2, 0.0),  # BR
-                WorldCoord(dm + w_t/2, cy + h_t/2, 0.0),  # TR
-                WorldCoord(dm - w_t/2, cy + h_t/2, 0.0),  # TL
-            ]
+            world_pts = geom.calibration_target_points(lane, dm, w_t, h_t)
             self.log(f"[标定] 目标位于 dm={dm}m, 车道{lane} (y={cy:.2f}m), {w_t}×{h_t}m")
         else:
             world_pts = geom.calibration_world_points()
         image_pts = [ImageCoord(float(u), float(v)) for u, v in rectified_pixels]
 
-        calib_names = CALIB_TARGET_NAMES if _use_target_names else CALIB_NAMES
+        if _use_target_names:
+            calib_names = CALIB_TARGET_NAMES
+        elif track_type == "400m":
+            calib_names = CALIB_NAMES_400M
+        else:
+            calib_names = CALIB_NAMES_100M
         for name, wp in zip(calib_names, world_pts):
             self.log(f"  {name}: world=({wp.x:.2f}, {wp.y:.2f}, {wp.z:.1f})")
 
@@ -578,12 +603,17 @@ class TrackARApp:
         cal_err = pipeline.calibrator.get_projection_error(world_pts, image_pts)
         self.log(f"标定误差: {cal_err:.3f}px")
         # Per-point errors
-        calib_names = CALIB_TARGET_NAMES if _use_target_names else CALIB_NAMES
+        if _use_target_names:
+            calib_names = CALIB_TARGET_NAMES
+        elif track_type == "400m":
+            calib_names = CALIB_NAMES_400M
+        else:
+            calib_names = CALIB_NAMES_100M
         per_pt = pipeline.calibrator.get_per_point_errors(world_pts, image_pts)
         for name, err in zip(calib_names, per_pt):
             flag = " ***" if err > 15 else ""
             self.log(f"  {name}: 误差={err:.1f}px{flag}")
-        pipeline.calibrator.print_calibration_debug(world_pts, image_pts)
+        pipeline.calibrator.print_calibration_debug(world_pts, image_pts, calib_names)
 
         if self.yolo_var.get():
             try:
@@ -694,7 +724,7 @@ class TrackARApp:
         import subprocess
         path = getattr(self, '_output_path', None)
         if path:
-            subprocess.Popen(f'explorer /select,"{path}"')
+            subprocess.Popen(['explorer', '/select,', path])
 
     def run(self):
         self.window.mainloop()

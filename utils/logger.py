@@ -27,8 +27,8 @@ class MetricsLogger:
         if session_name is None:
             session_name = f"session_{int(self.start_time)}"
         self.csv_file = self.log_dir / f"{session_name}.csv"
-        f = open(self.csv_file, 'w', newline='')
-        self.csv_writer = csv.writer(f)
+        self._csv_fh = open(self.csv_file, 'w', newline='')
+        self.csv_writer = csv.writer(self._csv_fh)
         self.csv_writer.writerow([
             "timestamp", "frame_id", "fps", "pipeline_latency_ms",
             "num_athletes", "num_alerts",
@@ -41,6 +41,12 @@ class MetricsLogger:
                 f"{record.fps:.1f}", f"{record.pipeline_latency_ms:.2f}",
                 record.num_athletes, record.num_alerts,
             ])
+            if hasattr(self, '_csv_fh') and self._csv_fh:
+                self._csv_fh.flush()
 
     def close(self):
-        pass
+        if hasattr(self, '_csv_fh') and self._csv_fh:
+            self._csv_fh.flush()
+            self._csv_fh.close()
+            self._csv_fh = None
+            self.csv_writer = None

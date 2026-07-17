@@ -29,6 +29,12 @@ class AthleteState:
     occluded: bool = False
     # How many consecutive frames this athlete has been coasting
     coast_count: int = 0
+    # Expected bbox size (for false positive rejection)
+    expected_bbox_area: float = 0.0
+    # Recent bbox width/height history
+    bbox_history: list[tuple[float, float]] = field(default_factory=list)
+    # Bias-free distance traveled (integrated from unbiased speed)
+    distance_traveled: float = 0.0
 
 
 class LaneAssigner:
@@ -39,6 +45,7 @@ class LaneAssigner:
     MAX_DIST_PX = 100.0
     OFF_TRACK_DIST_PX = 200.0
     DUPLICATE_PX_DIST = 40.0
+    MAX_MATCH_SCORE = 10.0
 
     def __init__(self, geometry: TrackGeometry, projector: Projector,
                  max_missed_frames: int = 600):
@@ -58,6 +65,8 @@ class LaneAssigner:
         self._frame_count = 0
         # Track region for 100m: computed from calibration
         self._track_bbox_100m: tuple[float, float, float, float] | None = None
+        # World-to-image homography for 100m dm estimation
+        self._world_to_image_H: np.ndarray | None = None
 
     def set_H_calib_current(self, H: np.ndarray | None):
         self._H_calib_curr = H
@@ -71,6 +80,9 @@ class LaneAssigner:
 
     def set_track_bbox_100m(self, bbox: tuple[float, float, float, float] | None):
         self._track_bbox_100m = bbox
+
+    def set_world_to_image_H(self, H: np.ndarray | None):
+        self._world_to_image_H = H
 
     def _current_to_calib(self, u: float, v: float) -> tuple[float, float]:
         if self._H_inv is None:
@@ -96,36 +108,52 @@ class LaneAssigner:
         self._frame_count = 0
         self._track_bbox_100m = None
 
+    def preinitialize_athletes(self, lanes: list[int], start_positions: dict[int, float] | None = None):
+        """Pre-populate athletes for all lanes so pending-track is not required."""
+        is_400m = self.geometry.length > 200
+        for lane in lanes:
+            world_y = self.geometry.lane_center_y(lane) if is_400m else 0.0
+            new = AthleteState(
+                lane=lane,
+                athlete_id=self.next_id,
+                d_m=0.0,
+                dm_min=0.0,
+                dm_max=0.0,
+                y_world=world_y,
+                detection=None,
+                tracking_confidence=0.5,
+            )
+            new.kalman.initialize(np.array([0.0]))
+            self.athletes[lane] = new
+            self.next_id += 1
+
     def _build_image_cache(self):
         if self.geometry._model is None:
             return
-        cache_id = id(self.projector)
-        if getattr(self, '_img_cache_id', None) == cache_id:
+        if getattr(self, '_cache_frame', -1) == self._frame_count:
             return
+        self._cache_frame = self._frame_count
         step = 2.0
         rd = self.geometry._model.race_distance()
         n = int(rd / step) + 1
-        self._img_pts: dict[int, np.ndarray] = {}
         self._img_dms: dict[int, np.ndarray] = {}
-        all_pts_list = []
+        all_wcs = []
+        lane_ranges = []
         for lane in range(1, 9):
             dm_list = np.arange(n, dtype=np.float64) * step
-            pts_list = []
-            for i in range(n):
-                dm = float(dm_list[i])
-                wc = self.geometry.world_coord(lane, dm)
-                ic = self.projector.project(wc)
-                pts_list.append((ic.u, ic.v))
-            pts_arr = np.array(pts_list, dtype=np.float64)
-            self._img_pts[lane] = pts_arr
             self._img_dms[lane] = dm_list
-            all_pts_list.append(pts_arr)
-        import cv2
-        all_pts_cat = np.concatenate(all_pts_list, axis=0).astype(np.int32).reshape(-1, 1, 2)
+            wcs = [self.geometry.world_coord(lane, float(dm_list[i])) for i in range(n)]
+            all_wcs.extend(wcs)
+            lane_ranges.append((len(all_wcs) - n, len(all_wcs)))
+        all_img = self.projector.project_batch(all_wcs)
+        self._img_pts: dict[int, np.ndarray] = {}
+        for lane, (start, end) in enumerate(lane_ranges, start=1):
+            pts = np.array([[all_img[i].u, all_img[i].v] for i in range(start, end)], dtype=np.float64)
+            self._img_pts[lane] = pts
+        all_pts_cat = np.concatenate(list(self._img_pts.values()), axis=0).astype(np.int32).reshape(-1, 1, 2)
         lane1_pts = self._img_pts[1].astype(np.int32).reshape(-1, 1, 2)
         self._outer_hull = cv2.convexHull(all_pts_cat)
         self._inner_hull = cv2.convexHull(lane1_pts)
-        self._img_cache_id = cache_id
 
     MARGIN_PX = 20.0
 
@@ -170,10 +198,7 @@ class LaneAssigner:
         if self.geometry._model is None:
             world = self.projector.unproject_to_ground(ImageCoord(u=u, v=v))
             lane = self.geometry.lane_from_y(world.y)
-            if lane is None:
-                lane = 1
             return lane, np.clip(world.x, 0.0, self.geometry.length), abs(world.y - self.geometry.lane_center_y(lane))
-        self._build_image_cache()
         best_lane = 1
         best_dm = 0.0
         best_dist = 1e9
@@ -192,7 +217,6 @@ class LaneAssigner:
         if self.geometry._model is None:
             world = self.projector.unproject_to_ground(ImageCoord(u=u, v=v))
             return np.clip(world.x, 0.0, self.geometry.length), abs(world.y - self.geometry.lane_center_y(lane))
-        self._build_image_cache()
         pts = self._img_pts[lane]
         d2 = (pts[:, 0] - u) ** 2 + (pts[:, 1] - v) ** 2
         min_idx = np.argmin(d2)
@@ -262,14 +286,32 @@ class LaneAssigner:
             dm_jump = abs(dm - prev_dm)
             if dm_jump > max_jump:
                 continue
-            # Score: weighted combo of pixel dist + dm jump + confidence
+            # Score: weighted combo of pixel dist + dm jump + confidence + bbox consistency
             score = px_d2 * 0.5 + dm_jump * 3.0 + (1.0 - det.confidence) * 5.0
+            if athlete.frames_tracked > 10 and athlete.bbox_history:
+                avg_h = np.mean([b[1] for b in athlete.bbox_history[-10:]])
+                if avg_h > 0:
+                    h_ratio = det.height / avg_h
+                    if h_ratio < 0.4 or h_ratio > 2.5:
+                        score += 80.0
+                    elif h_ratio < 0.6 or h_ratio > 1.8:
+                        score += 30.0
+            if athlete.tracking_confidence > 0.7 and det.confidence < 0.5:
+                score += 40.0
             if score < best_score:
                 best_score = score
                 best_det = det
                 best_dm = dm
         if best_det is not None:
-            return best_det, best_dm
+            use_strict = len(detections) > 15
+            if use_strict:
+                score_thresh = self.MAX_MATCH_SCORE * (1.0 + (1.0 - athlete.tracking_confidence) * 2.0)
+                if athlete.frames_tracked < 15:
+                    score_thresh *= 2.0
+            else:
+                score_thresh = 1e9
+            if best_score < score_thresh:
+                return best_det, best_dm
         return None
 
     # ── Main frame processing ───────────────────────────────────────────
@@ -309,7 +351,7 @@ class LaneAssigner:
                         continue
                     inter = (x2 - x1) * (y2 - y1)
                     aj_area = max((bj[2] - bj[0]), 1) * max((bj[3] - bj[1]), 1)
-                    iou = inter / min(ai_area + aj_area - inter, ai_area + aj_area)
+                    iou = inter / (ai_area + aj_area - inter + 1e-6)
                     if iou > 0.85:
                         keep[j] = False
             filtered_dets = [d for d, k in zip(filtered_dets, keep) if k]
@@ -323,7 +365,11 @@ class LaneAssigner:
 
         # 1. Match existing athletes via prediction-guided pixel search
         dets_used: set[int] = set()
-        for lane in sorted(self.athletes.keys()):
+        match_order = sorted(self.athletes.keys(),
+                             key=lambda l: (self.athletes[l].coast_count,
+                                            -self.athletes[l].tracking_confidence),
+                             reverse=True)
+        for lane in match_order:
             athlete = self.athletes[lane]
             result = self._match_existing_athlete(athlete, filtered_dets, frame_dt, dets_used)
             if result is not None:
@@ -337,16 +383,20 @@ class LaneAssigner:
                 athlete.detection = det
                 # Use innovation-gated Kalman update with confidence
                 athlete.kalman.update(np.array([dm]), confidence=athlete.tracking_confidence)
-                athlete.kalman.x[0, 0] = dm  # force position to measurement
+                athlete.kalman.x[0, 0] = dm
                 new_speed = abs(dm - prev_dm) / max(frame_dt, 0.001)
                 athlete.speed_mps = np.clip(
                     athlete.speed_mps * 0.7 + new_speed * 0.3,
                     -self.MAX_SPEED_MPS, self.MAX_SPEED_MPS)
+                athlete.distance_traveled += abs(dm - prev_dm)
                 athlete.frames_missed = 0
                 athlete.frames_tracked += 1
                 athlete.tracking_confidence = min(1.0, athlete.tracking_confidence + 0.1)
                 du, dv = det.bottom_center
                 athlete.last_px = (du, dv)
+                athlete.bbox_history.append((det.width, det.height))
+                if len(athlete.bbox_history) > 30:
+                    athlete.bbox_history.pop(0)
                 matched_lanes.add(lane)
 
         # 1.5 Fallback: re-acquire unmatched athletes with wider search
@@ -365,12 +415,7 @@ class LaneAssigner:
                 cu, cv = self._current_to_calib(u, v)
                 if not self._is_in_track_region(cu, cv):
                     continue
-                if is_400m:
-                    _, dm, _ = self._find_lane_dm_from_image(cu, cv)
-                else:
-                    _, dm, _ = self._find_lane_dm_from_image(cu, cv)
-                    if dm > self.geometry.length * 2:
-                        continue
+                _, dm, _ = self._find_lane_dm_from_image(cu, cv)
                 if is_400m and dm < 5.0 and athlete.d_m > self.geometry.length - 15.0:
                     dm = self.geometry.length
                 dm_jump = abs(dm - athlete.d_m)
@@ -397,6 +442,7 @@ class LaneAssigner:
                 athlete.speed_mps = np.clip(
                     athlete.speed_mps * 0.7 + new_speed * 0.3,
                     -self.MAX_SPEED_MPS, self.MAX_SPEED_MPS)
+                athlete.distance_traveled += abs(dm - prev_dm)
                 athlete.frames_missed = 0
                 athlete.coast_count = 0
                 athlete.frames_tracked += 1
@@ -516,6 +562,8 @@ class LaneAssigner:
                 predicted = self._get_predicted_dm(athlete)
                 athlete.d_m = predicted
                 athlete.kalman.x[0, 0] = float(np.clip(athlete.kalman.x[0, 0], 0.0, self.geometry.length))
+                vel = athlete.kalman.get_velocity()
+                athlete.distance_traveled += abs(vel) * frame_dt
                 # Faster confidence decay during extended coast
                 decay = 0.05 if athlete.coast_count < 10 else 0.1
                 athlete.tracking_confidence = max(0.0, athlete.tracking_confidence - decay)
