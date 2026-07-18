@@ -178,7 +178,7 @@ class LaneAssigner:
         return True
 
     # ── Audience / Off-Track filter ─────────────────────────────────────
-    MIN_ATHLETE_HEIGHT = 60
+    MIN_ATHLETE_HEIGHT = 40
     MAX_ATHLETE_ASPECT = 2.5
     MIN_ATHLETE_ASPECT = 0.3
 

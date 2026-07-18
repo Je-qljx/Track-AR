@@ -84,10 +84,10 @@ class TrackARPipeline:
         )
 
     def _compute_track_bbox(self):
-        """Compute track bounding box in image space for audience filtering."""
+        """Compute track bounding box in image space for 100m audience filtering."""
         if self.geometry._model is not None:
             return
-        margin = 40
+        margin = 200
         pts = []
         for lane in (1, 8):
             for dm in (0.0, self.geometry.length):

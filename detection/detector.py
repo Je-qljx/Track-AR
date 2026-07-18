@@ -65,7 +65,7 @@ try:
                 self.model.to('cuda')
 
         def detect(self, frame: np.ndarray) -> list[Detection]:
-            results = self.model(frame, conf=self.conf_threshold, imgsz=self.input_size, classes=[0], verbose=False)
+            results = self.model(frame, conf=self.conf_threshold, iou=0.5, imgsz=self.input_size, classes=[0], verbose=False)
             detections = []
             for r in results:
                 for box in r.boxes:

@@ -124,6 +124,10 @@ def main():
     parser.add_argument("--max-frames", type=int, default=-1, help="Max frames to process (-1 = all)")
     parser.add_argument("--no-yolo", action="store_true", help="Use dummy detector instead of YOLO")
     parser.add_argument("--model", default="yolov8s.pt", help="YOLO model path (default: yolov8s.pt)")
+    parser.add_argument("--detect-conf", type=float, default=0.35,
+                        help="YOLO detection confidence threshold (default: 0.35). Lower to catch small/far athletes.")
+    parser.add_argument("--yolo-imgsz", type=int, default=640,
+                        help="YOLO input image size (default: 640). Use 1280 for better small-object detection.")
     parser.add_argument("--track-type", default="100m", choices=["100m", "400m"],
                         help="Track geometry type (default: 100m). Use 400m for oval tracks.")
     args = parser.parse_args()
@@ -244,9 +248,9 @@ def main():
     else:
         try:
             from detection.detector import YOLODetector
-            detector = YOLODetector(model_path=args.model)
+            detector = YOLODetector(model_path=args.model, conf_threshold=args.detect_conf, input_size=args.yolo_imgsz)
             pipeline.set_detector(detector)
-            print(f"[OK] YOLO detector loaded: {args.model}")
+            print(f"[OK] YOLO detector loaded: {args.model} (conf={args.detect_conf}, imgsz={args.yolo_imgsz})")
         except Exception as e:
             print(f"[WARN] Could not load YOLO ({e}). Falling back to DummyDetector.")
 

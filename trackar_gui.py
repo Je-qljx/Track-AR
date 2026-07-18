@@ -98,8 +98,21 @@ class TrackARApp:
         ttk.Label(left, text="检测", font=("", 10, "bold")).grid(row=13, column=0, sticky="w")
         self.yolo_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(left, text="使用 YOLO（需安装 ultralytics）", variable=self.yolo_var).grid(row=14, column=0, sticky="w", pady=2)
+        # Detection confidence & imgsz
+        det_cfg = ttk.Frame(left)
+        det_cfg.grid(row=15, column=0, sticky="ew", pady=2)
+        ttk.Label(det_cfg, text="置信度:").pack(side=tk.LEFT)
+        self.detect_conf_var = tk.DoubleVar(value=0.35)
+        ttk.Scale(det_cfg, from_=0.1, to=0.9, orient="horizontal",
+                  variable=self.detect_conf_var, length=80).pack(side=tk.LEFT, padx=(2, 4))
+        self.detect_conf_label = ttk.Label(det_cfg, text="0.35", width=4)
+        self.detect_conf_label.pack(side=tk.LEFT)
+        ttk.Label(det_cfg, text=" 输入:").pack(side=tk.LEFT)
+        self.detect_imgsz_var = tk.IntVar(value=640)
+        ttk.Spinbox(det_cfg, from_=320, to=1280, increment=320,
+                    textvariable=self.detect_imgsz_var, width=5).pack(side=tk.LEFT)
 
-        ttk.Separator(left, orient="horizontal").grid(row=15, column=0, sticky="ew", pady=4)
+        ttk.Separator(left, orient="horizontal").grid(row=16, column=0, sticky="ew", pady=4)
 
         # Calibration target mode
         self.target_mode_var = tk.BooleanVar(value=False)
@@ -107,8 +120,8 @@ class TrackARApp:
         self.target_check = ttk.Checkbutton(left, text="使用标定物替代起终点",
                                              variable=self.target_mode_var,
                                              command=self._on_target_mode_toggle)
-        self.target_check.grid(row=16, column=0, sticky="w", pady=(0, 2))
-        self.target_frame.grid(row=17, column=0, sticky="ew", padx=4)
+        self.target_check.grid(row=17, column=0, sticky="w", pady=(0, 2))
+        self.target_frame.grid(row=18, column=0, sticky="ew", padx=4)
         self.target_frame.columnconfigure(1, weight=1)
         # Target position
         ttk.Label(self.target_frame, text="位置距离 (m):").grid(row=0, column=0, sticky="w", padx=(0, 4))
@@ -131,19 +144,19 @@ class TrackARApp:
 
         # Buttons
         self.calibrate_btn = ttk.Button(left, text="标定（点击4个点）", command=self._calibrate, state="disabled")
-        self.calibrate_btn.grid(row=18, column=0, sticky="ew", pady=2)
+        self.calibrate_btn.grid(row=19, column=0, sticky="ew", pady=2)
         self.start_btn = ttk.Button(left, text="开始处理", command=self._start_processing, state="disabled")
-        self.start_btn.grid(row=19, column=0, sticky="ew", pady=2)
+        self.start_btn.grid(row=20, column=0, sticky="ew", pady=2)
         self.open_btn = ttk.Button(left, text="打开输出文件夹", command=self._open_output, state="disabled")
-        self.open_btn.grid(row=20, column=0, sticky="ew", pady=2)
+        self.open_btn.grid(row=21, column=0, sticky="ew", pady=2)
 
-        ttk.Separator(left, orient="horizontal").grid(row=21, column=0, sticky="ew", pady=4)
+        ttk.Separator(left, orient="horizontal").grid(row=22, column=0, sticky="ew", pady=4)
 
         # Calibration info
         self.calib_label = ttk.Label(left, text="标定: 未完成", foreground="gray")
-        self.calib_label.grid(row=22, column=0, sticky="w", pady=2)
+        self.calib_label.grid(row=23, column=0, sticky="w", pady=2)
         self.output_label = ttk.Label(left, text="", foreground="gray")
-        self.output_label.grid(row=23, column=0, sticky="w")
+        self.output_label.grid(row=24, column=0, sticky="w")
 
         # Right: preview + progress
         right = ttk.Frame(main)
@@ -618,8 +631,10 @@ class TrackARApp:
         if self.yolo_var.get():
             try:
                 from detection.detector import YOLODetector
-                pipeline.set_detector(YOLODetector())
-                self.log("使用 YOLO 检测器")
+                conf = self.detect_conf_var.get()
+                imgsz = self.detect_imgsz_var.get()
+                pipeline.set_detector(YOLODetector(conf_threshold=conf, input_size=imgsz))
+                self.log(f"使用 YOLO 检测器 (conf={conf:.2f}, imgsz={imgsz})")
             except Exception as e:
                 self.log(f"YOLO 不可用: {e}，使用虚拟检测器")
         else:
