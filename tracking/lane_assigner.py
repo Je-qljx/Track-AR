@@ -405,6 +405,8 @@ class LaneAssigner:
             if lane in matched_lanes:
                 continue
             athlete = self.athletes[lane]
+            if athlete.frames_tracked == 0:
+                continue  # never matched before; don't use fallback
             # Progressive recovery: wider search for longer-missing athletes
             coast_factor = 1.0 + athlete.coast_count * 0.5
             best = None
@@ -462,9 +464,24 @@ class LaneAssigner:
                 a.coast_count = 0
 
         # 2. Filter unused detections for new athletes (with duplicate guard)
+        # Suppress unused detections very close to any matched detection (same person, partial YOLO box)
+        matched_centers = []
+        for i in dets_used:
+            bc = filtered_dets[i].bottom_center
+            matched_centers.append(bc)
         unused_dets = []
         for i, d in enumerate(filtered_dets):
             if i in dets_used:
+                continue
+            u_raw, v_raw = d.bottom_center
+            is_close_to_matched = False
+            for mu, mv in matched_centers:
+                du = u_raw - mu
+                dv = v_raw - mv
+                if du * du + dv * dv < 1600:  # 40px threshold
+                    is_close_to_matched = True
+                    break
+            if is_close_to_matched:
                 continue
             conf_ok = d.confidence >= (self.MIN_CONFIDENCE_NEW if is_400m else self.MIN_CONFIDENCE)
             if not conf_ok:
