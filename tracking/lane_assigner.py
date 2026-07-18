@@ -281,14 +281,13 @@ class LaneAssigner:
                 continue
             cu, cv = self._current_to_calib(du, dv)
             dm, pixel_dist = self._find_dm_on_lane(cu, cv, athlete.lane)
-            if pixel_dist > 80:
+            if pixel_dist > 150:
                 continue
             if dm < 5.0 and prev_dm > self.geometry.length - 15.0:
                 dm = self.geometry.length
             dm_jump = abs(dm - prev_dm)
             if dm_jump > max_jump:
                 continue
-            # Score: weighted combo of pixel dist + dm jump + confidence + bbox consistency
             score = px_d2 * 0.5 + dm_jump * 3.0 + (1.0 - det.confidence) * 5.0
             if athlete.frames_tracked > 10 and athlete.bbox_history:
                 avg_h = np.mean([b[1] for b in athlete.bbox_history[-10:]])
@@ -305,7 +304,7 @@ class LaneAssigner:
                 best_det = det
                 best_dm = dm
         if best_det is not None:
-            use_strict = len(detections) > 15 and athlete.frames_tracked > 0
+            use_strict = len(detections) > 15
             if use_strict:
                 score_thresh = self.MAX_MATCH_SCORE * (1.0 + (1.0 - athlete.tracking_confidence) * 2.0)
                 if athlete.frames_tracked < 15:
@@ -354,7 +353,7 @@ class LaneAssigner:
                     inter = (x2 - x1) * (y2 - y1)
                     aj_area = max((bj[2] - bj[0]), 1) * max((bj[3] - bj[1]), 1)
                     iou = inter / (ai_area + aj_area - inter + 1e-6)
-                    if iou > 0.5:
+                    if iou > 0.65:
                         keep[j] = False
             filtered_dets = [d for d, k in zip(filtered_dets, keep) if k]
 
@@ -417,10 +416,8 @@ class LaneAssigner:
                 cu, cv = self._current_to_calib(u, v)
                 if not self._is_in_track_region(cu, cv):
                     continue
-                match_lane, dm, pixel_dist = self._find_lane_dm_from_image(cu, cv)
-                if pixel_dist > 80:
-                    continue
-                if not is_400m and match_lane != lane:
+                _, dm, fp_dist = self._find_lane_dm_from_image(cu, cv)
+                if fp_dist > 150:
                     continue
                 if is_400m and dm < 5.0 and athlete.d_m > self.geometry.length - 15.0:
                     dm = self.geometry.length
